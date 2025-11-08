@@ -177,7 +177,7 @@ class AnimatedEmoji(Widget):
             
         elif self.moisture_level > 30:
             # Worried face
-            self.draw_worried_mount(center_x, center_y, mouth_width, circle_size)
+            self.draw_worried_mouth(center_x, center_y, mouth_width, circle_size)
             self.animate_face_color((1, 0.8, 0.1, 1)) # Darker yellow
             self.hide_tear()
         
@@ -419,6 +419,157 @@ class AlertLabel(Label):
             shake.start(self)
         else:
             fade_in.start(self)
+
+class SmartAgricDashboard(BoxLayout):
+    def __init__(self, **kwargs):
+        super().__init__(orientation='vertical', **kwargs)
+        
+        self.plant_name = "Tomato Plant #1"
+        
+        # Alert label at top
+        self.alert_label = AlertLabel(
+            text=f"Monitoring {self.plant_name}",
+            size_hint=(1, None),
+            height=60,
+            font_size='20sp',
+            bold=True
+        )
+        self.add_widget(self.alert_label)
+        
+        # Main content area - horizontal layout
+        content = BoxLayout(orientation='horizontal', size_hint=(1, 1))
+        
+        # Left side - Moisture bar (takex 25% width)
+        moisture_container = BoxLayout(
+            orientation='vertical',
+            size_hint=(0.25, 1),
+            padding=10,
+            spacing=10
+        )
+        
+        moisture_label = Label(
+            text="Soil Moisture",
+            size_hint=(1, None),
+            height=40,
+            font_size='16sp'
+        )
+        
+        moisture_container.add_widget(moisture_label)
+        
+        self.moisture = MoistureIndicator(size_hint=(1, 1))
+        moisture_container.add_widget(self.moisture)
+        
+        self.moisture_text = Label(
+            text='50%',
+            size_hint=(1, None),
+            height=40,
+            font_size='24sp',
+            bold=True
+        )
+        moisture_container.add_widget(self.moisture_text)
+        
+        content.add_widget(moisture_container)
+        
+        # Center - Emoji (takes 75% width, perfect circle centered)
+        emoji_container = FloatLayout(size_hint=(0.75, 1))
+        
+        # Emoji will be centered and maintain perfect circle
+        self.emoji = AnimatedEmoji(
+            size_hint = (None, None),
+            size = (300, 300),
+            pos_hint= {'center_x': 0.5, 'center_y': 0.5}
+        )
+        
+        emoji_container.add_widget(self.emoji)
+        
+        content.add_widget(emoji_container)
+        
+        self.add_widget(content)
+        
+        # Bottom info bar
+        info_bar = BoxLayout(
+            orientation='horizontal',
+            size_hint=(1, None),
+            height=50,
+            padding=10,
+            spacing=10
+        )
+        
+        self.status_label = Label(
+            text='Status: Monitoring....',
+            size_hint=(1, 1),
+            font_size='16sp'
+        )
+        
+        info_bar.add_widget(self.status_label)
+        
+        self.add_widget(info_bar)
+        
+        # Bind to window resize to adjust emoji size
+        self.bind(size=self.adjust_emoji_size)
+        
+        # Simulate sensor readings
+        Clock.schedule_interval(self.simulate_sensor_update, 5)
+
+    def adjust_emoji_size(self, *args):
+        """Adjust emoji size to fit screen while maintaining perfect circle"""
+        # Calculate appropriate size (70% of available height or width, whichever is smaller)
+        available_height = self.height - 110  # Subtract header and footer
+        available_width = self.width * 0.75 * 0.9  # 75% width container, 90% of that
+        
+        # Use smaller dimension to ensure it fits
+        size = min(available_height, available_width)
+        size = max(size, 100)  # Minimum size of 100
+        
+        self.emoji.size = (size, size)
+    
+    def simulate_sensor_update(self, dt):
+        """Simulate sensor data updates"""
+        import random
+        
+        # Simulate moisture reading
+        moisture = random.randint(20, 95)
+        
+        # Animate both widgets
+        self.moisture.animate_to_level(moisture)
+        self.emoji.animate_to_level(moisture)
+        
+        # Update info
+        self.moisture_text.text = f'{moisture}%'
+        
+        # Update alerts and status
+        if moisture < 30:
+            self.alert_label.show_alert(
+                f"{self.plant_name} is TOO DRY! Water needed!",
+                alert_type="critical"
+            )
+            self.status_label.text = 'Status: CRITICAL - Water immediately!'
+            self.status_label.color = (1, 0, 0, 1)
+        elif moisture < 60:
+            self.alert_label.show_alert(
+                f"{self.plant_name} needs attention",
+                alert_type="warning"
+            )
+            self.status_label.text = 'Status: Warning - Water soon'
+            self.status_label.color = (1, 0.8, 0, 1)
+        else:
+            self.alert_label.show_alert(
+                f"{self.plant_name} is happy and healthy!",
+                alert_type="info"
+            )
+            self.status_label.text = 'Status: Healthy - All good!'
+            self.status_label.color = (0, 0.8, 0.2, 1)
+
+
+class SmartAgricApp(App):
+    def build(self):
+        return SmartAgricDashboard()
+
+
+if __name__ == '__main__':
+    SmartAgricApp().run()
+        
+    
         
                 
                 
