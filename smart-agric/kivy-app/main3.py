@@ -19,7 +19,6 @@ BAUD_RATE = 9600
 
 def read_sensor_data(ser):
     """Read and parse JSON data from Arduino"""
-    
     try:
         # Read one line from serial
         line = ser.readline().decode("utf-8").strip()
@@ -41,12 +40,30 @@ def read_sensor_data(ser):
         print("Error reading from serial:", e)
         return None
 
+
 def save_to_csv(data):
-    """Save to data CSV file for logging"""
+    """Save data as JSON to CSV file for easy parsing later"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    with open('sensor_log.csv', 'a') as f:
-        f.write(f"{timestamp},{data['raw']},{data['moisture']},{data['temperature']},{data['humidity']},{data['status']}")
+    try:
+        # Create a complete data dictionary with timestamp
+        log_entry = {
+            'timestamp': timestamp,
+            'raw': data['raw'],
+            'moisture': data['moisture'],
+            'temperature': data['temperature'],
+            'humidity': data['humidity'],
+            'status': data['status']
+        }
+        
+        # Save as JSON string (one JSON object per line)
+        with open('sensor_log.jsonl', 'a') as f:
+            f.write(json.dumps(log_entry) + '\n')
+        
+        print(f"Saved to log: {log_entry}")
+        
+    except Exception as e:
+        print(f"Error saving to file: {e}")
 
 
 class AnimatedFace(Widget):
@@ -244,8 +261,6 @@ class AnimatedFace(Widget):
         
         left_eye_x, left_eye_y = self.left_eye.pos
         right_eye_x, right_eye_y = self.right_eye.pos
-        left_high_x, left_high_y = self.left_eye_highlight.pos
-        right_high_x, right_high_y = self.right_eye_highlight.pos
         
         # Close eyes
         close_anim = Animation(
@@ -329,8 +344,8 @@ class AnimatedFace(Widget):
             self.show_tear(center_x, center_y)
     
     def animate_background_color(self, target_color):
-        """Animate the background color change"""
-        anim = Animation(rgba=target_color, duration=1)
+        """Animate the background color change - FASTER"""
+        anim = Animation(rgba=target_color, duration=0.3)  # Changed from 1 to 0.3
         anim.start(self.bg_color)
     
     def draw_happy_eyebrows(self, center_x, center_y):
@@ -458,7 +473,8 @@ class AnimatedFace(Widget):
         anim.start(self.tear_color)
     
     def animate_to_level(self, new_level):
-        anim = Animation(moisture_level=new_level, duration=1, t='in_out_quad')
+        # FASTER animation - changed from 1 to 0.3 seconds
+        anim = Animation(moisture_level=new_level, duration=0.3, t='in_out_quad')
         anim.start(self)
 
 
@@ -491,7 +507,7 @@ class SmartAgricDashboard(FloatLayout):
             size_hint=(1, 0.6)
         )
         self.temp_value = Label(
-            text='24C',
+            text='--C',
             font_size='22sp',
             bold=True,
             color=(0.2, 0.2, 0.2, 1),
@@ -517,7 +533,7 @@ class SmartAgricDashboard(FloatLayout):
             size_hint=(1, 0.6)
         )
         self.humidity_value = Label(
-            text='65%',
+            text='--%',
             font_size='22sp',
             bold=True,
             color=(0.2, 0.2, 0.2, 1),
@@ -529,7 +545,7 @@ class SmartAgricDashboard(FloatLayout):
         
         # Bottom center - Moisture percentage
         self.moisture_label = Label(
-            text='50%',
+            text='--%',
             font_size='56sp',
             bold=True,
             color=(0.2, 0.2, 0.2, 1),
@@ -539,12 +555,69 @@ class SmartAgricDashboard(FloatLayout):
         )
         self.add_widget(self.moisture_label)
         
-        # Start simulation
-        # Clock.schedule_interval(self.simulate_sensor_update, 5)
+        # Initialize serial connection ONCE
+        self.ser = None
+        self.init_serial_connection()
         
-        Clock.schedule_interval(self.read_sensor_value, 5)
+        # Read sensor faster - every 0.5 seconds
+        Clock.schedule_interval(self.read_sensor_value, 0.5)
+    
+    def init_serial_connection(self):
+        """Initialize serial connection once"""
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            time.sleep(2)  # Wait for Arduino to initialize
+            self.ser.flushInput()
+            print(f"Connected to {SERIAL_PORT} successfully!")
+        except serial.SerialException as e:
+            print(f"Error: Could not connect to {SERIAL_PORT}: {e}")
+            print("Starting in simulation mode...")
+            self.ser = None
+    
+    def read_sensor_value(self, dt):
+        """Read ONE sensor reading per call (non-blocking)"""
+        
+        # If serial not connected, use simulation
+        if self.ser is None:
+            self.simulate_sensor_update(dt)
+            return
+        
+        try:
+            # Read ONCE - don't loop!
+            data = read_sensor_data(self.ser)
+            
+            if data:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                moisture = data['moisture']
+                temperature = data.get('temperature', 0)
+                humidity = data.get('humidity', 0)
+                
+                print(f"[{timestamp}] Raw: {data['raw']:4d} | "
+                      f"Moisture: {moisture:3d}% | "
+                      f"Temp: {temperature:.1f}C | "
+                      f"Humidity: {humidity:.1f}% | "
+                      f"Status: {data['status']}")
+                
+                # Update UI immediately
+                self.face.animate_to_level(moisture)
+                self.moisture_label.text = str(moisture) + '%'
+                self.temp_value.text = str(int(temperature)) + 'C'
+                self.humidity_value.text = str(int(humidity)) + '%'
+                
+                # Save to JSON log
+                save_to_csv(data)
+                
+        except serial.SerialException as e:
+            print(f"Serial error: {e}")
+            if self.ser:
+                self.ser.close()
+            self.ser = None
+        except Exception as e:
+            print(f"Error reading sensor: {e}")
     
     def simulate_sensor_update(self, dt):
+        """Fallback simulation mode"""
         import random
         
         moisture = random.randint(20, 95)
@@ -557,47 +630,21 @@ class SmartAgricDashboard(FloatLayout):
         self.temp_value.text = str(temp) + 'C'
         self.humidity_value.text = str(humidity) + '%'
     
-    def read_sensor_value(self, dt):
-        port = SERIAL_PORT
-        
-        try:
-            ser = serial.Serial(port, BAUD_RATE, timeout=2)
-            time.sleep(2)
-            
-            ser.flushInput()
-            
-            """
-            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}
-            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}     
-            """
-            
-            data = read_sensor_data(ser)
-                
-            if data:
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:S')
-                
-                print(f"[{timestamp}] Raw: {data['raw']:4d} | " f"Moisture: {data['moisture']:3d}% |"
-                  f" Status: {data['status']}")
-                moisture = data['moisture']
-                temperature = data['temperature']
-                humidity = data['humidity']
-                self.face.animate_to_level(moisture)
-                self.moisture_label.text = str(moisture) + '%'
-                self.temp_value.text = str(temperature) + ' C'
-                self.humidity_value.text = str(humidity) + '%'
-                print(f"Soil moisture label {self.moisture_label.text}")
-                save_to_csv(data)
-            time.sleep(0.1)
-        
-        except serial.SerialException as e:
-            print(f"\n Errir: Could not connect to {port}")
-            
-                    
+    def on_stop(self):
+        """Clean up serial connection when app closes"""
+        if self.ser:
+            self.ser.close()
+            print("Serial connection closed")
 
 
 class SmartAgricApp(App):
     def build(self):
         return SmartAgricDashboard()
+    
+    def on_stop(self):
+        """Called when app is closing"""
+        self.root.on_stop()
+        return True
 
 
 if __name__ == '__main__':
