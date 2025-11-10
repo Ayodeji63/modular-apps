@@ -4,7 +4,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.uix.widget import Widget
 from kivy.animation import Animation
-from kivy.graphics import Color, Rectangle, Ellipse
+from kivy.graphics import Color, Rectangle, Ellipse, Line
 from kivy.properties import NumericProperty, StringProperty
 from kivy.clock import Clock
 from kivy.core.window import Window
