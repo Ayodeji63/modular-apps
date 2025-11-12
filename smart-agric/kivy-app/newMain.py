@@ -8,6 +8,46 @@ from kivy.graphics import Color, Rectangle, Ellipse, Line
 from kivy.properties import NumericProperty, StringProperty
 from kivy.clock import Clock
 
+import serial
+import json 
+import time
+from datetime import datetime
+
+SERIAL_PORT = '/dev/ttyUSB0'
+BAUD_RATE = 9600
+
+
+def read_sensor_data(ser):
+    """Read and parse JSON data from Arduino"""
+    
+    try:
+        # Read one line from serial
+        line = ser.readline().decode("utf-8").strip()
+        
+        # Skip non-JSON lines (startup messages, etc.)
+        if not line.startswith('{'):
+            return None
+        
+        # parse JSON data
+        data = json.loads(line)
+        return data
+    
+    except json.JSONDecodeError:
+        print("Failed to decode JSON:", line)
+        return None
+    except UnicodeDecodeError:
+        return None
+    except Exception as e:
+        print("Error reading from serial:", e)
+        return None
+
+def save_to_csv(data):
+    """Save to data CSV file for logging"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    with open('sensor_log.csv', 'a') as f:
+        f.write(f"{timestamp},{data['raw']},{data['moisture']},{data['temperature']},{data['humidity']},{data['status']}")
+
 
 class AnimatedFace(Widget):
     moisture_level = NumericProperty(50)
@@ -290,7 +330,7 @@ class AnimatedFace(Widget):
     
     def animate_background_color(self, target_color):
         """Animate the background color change"""
-        anim = Animation(rgba=target_color, duration=1)
+        anim = Animation(rgba=target_color, duration=0.5)
         anim.start(self.bg_color)
     
     def draw_happy_eyebrows(self, center_x, center_y):
@@ -500,7 +540,9 @@ class SmartAgricDashboard(FloatLayout):
         self.add_widget(self.moisture_label)
         
         # Start simulation
-        Clock.schedule_interval(self.simulate_sensor_update, 5)
+        # Clock.schedule_interval(self.simulate_sensor_update, 5)
+        
+        Clock.schedule_interval(self.read_sensor_value, 5)
     
     def simulate_sensor_update(self, dt):
         import random
@@ -514,6 +556,43 @@ class SmartAgricDashboard(FloatLayout):
         self.moisture_label.text = str(moisture) + '%'
         self.temp_value.text = str(temp) + 'C'
         self.humidity_value.text = str(humidity) + '%'
+    
+    def read_sensor_value(self, dt):
+        port = SERIAL_PORT
+        
+        try:
+            ser = serial.Serial(port, BAUD_RATE, timeout=2)
+            # time.sleep(2)
+            
+            ser.flushInput()
+            
+            """
+            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}
+            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}     
+            """
+            
+            data = read_sensor_data(ser)
+                
+            if data:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:S')
+                
+                print(f"[{timestamp}] Raw: {data['raw']:4d} | " f"Moisture: {data['moisture']:3d}% |"
+                  f" Status: {data['status']}")
+                moisture = data['moisture']
+                temperature = data['temperature']
+                humidity = data['humidity']
+                self.face.animate_to_level(moisture)
+                self.moisture_label.text = str(moisture) + '%'
+                self.temp_value.text = str(temperature) + ' C'
+                self.humidity_value.text = str(humidity) + '%'
+                print(f"Soil moisture label {self.moisture_label.text}")
+                save_to_csv(data)
+            # time.sleep(0.1)
+        
+        except serial.SerialException as e:
+            print(f"\n Errir: Could not connect to {port}")
+            
+                    
 
 
 class SmartAgricApp(App):
