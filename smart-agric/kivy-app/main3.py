@@ -19,6 +19,7 @@ BAUD_RATE = 9600
 
 def read_sensor_data(ser):
     """Read and parse JSON data from Arduino"""
+
     try:
         # Read one line from serial
         line = ser.readline().decode("utf-8").strip()
@@ -64,6 +65,17 @@ def save_to_csv(data):
         
     except Exception as e:
         print(f"Error saving to file: {e}")
+<<<<<<< HEAD
+=======
+def save_to_csv(data):
+    """Save to data CSV file for logging"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    with open('sensor_log.csv', 'a') as f:
+        f.write(f"{timestamp},{data['raw']},{data['moisture']},{data['temperature']},{data['humidity']},{data['status']}")
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7:smart-agric/kivy-app/newMain.py
+=======
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
 
 
 class AnimatedFace(Widget):
@@ -344,8 +356,18 @@ class AnimatedFace(Widget):
             self.show_tear(center_x, center_y)
     
     def animate_background_color(self, target_color):
+<<<<<<< HEAD
+<<<<<<< HEAD:smart-agric/kivy-app/main3.py
         """Animate the background color change - FASTER"""
         anim = Animation(rgba=target_color, duration=0.3)  # Changed from 1 to 0.3
+=======
+        """Animate the background color change"""
+        anim = Animation(rgba=target_color, duration=0.5)
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7:smart-agric/kivy-app/newMain.py
+=======
+        """Animate the background color change - FASTER"""
+        anim = Animation(rgba=target_color, duration=0.3)  # Changed from 1 to 0.3
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
         anim.start(self.bg_color)
     
     def draw_happy_eyebrows(self, center_x, center_y):
@@ -555,6 +577,10 @@ class SmartAgricDashboard(FloatLayout):
         )
         self.add_widget(self.moisture_label)
         
+<<<<<<< HEAD
+<<<<<<< HEAD:smart-agric/kivy-app/main3.py
+=======
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
         # Initialize serial connection ONCE
         self.ser = None
         self.init_serial_connection()
@@ -615,6 +641,15 @@ class SmartAgricDashboard(FloatLayout):
             self.ser = None
         except Exception as e:
             print(f"Error reading sensor: {e}")
+<<<<<<< HEAD
+=======
+        # Start simulation
+        # Clock.schedule_interval(self.simulate_sensor_update, 5)
+        
+        Clock.schedule_interval(self.read_sensor_value, 5)
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7:smart-agric/kivy-app/newMain.py
+=======
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
     
     def simulate_sensor_update(self, dt):
         """Fallback simulation mode"""
@@ -630,11 +665,56 @@ class SmartAgricDashboard(FloatLayout):
         self.temp_value.text = str(temp) + 'C'
         self.humidity_value.text = str(humidity) + '%'
     
+<<<<<<< HEAD
+<<<<<<< HEAD:smart-agric/kivy-app/main3.py
+=======
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
     def on_stop(self):
         """Clean up serial connection when app closes"""
         if self.ser:
             self.ser.close()
             print("Serial connection closed")
+<<<<<<< HEAD
+=======
+    def read_sensor_value(self, dt):
+        port = SERIAL_PORT
+        
+        try:
+            ser = serial.Serial(port, BAUD_RATE, timeout=2)
+            # time.sleep(2)
+            
+            ser.flushInput()
+            
+            """
+            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}
+            {"raw":446,"moisture":4,"humidity":63.00,"temperature":30.00,"status":"DRY"}     
+            """
+            
+            data = read_sensor_data(ser)
+                
+            if data:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:S')
+                
+                print(f"[{timestamp}] Raw: {data['raw']:4d} | " f"Moisture: {data['moisture']:3d}% |"
+                  f" Status: {data['status']}")
+                moisture = data['moisture']
+                temperature = data['temperature']
+                humidity = data['humidity']
+                self.face.animate_to_level(moisture)
+                self.moisture_label.text = str(moisture) + '%'
+                self.temp_value.text = str(temperature) + ' C'
+                self.humidity_value.text = str(humidity) + '%'
+                print(f"Soil moisture label {self.moisture_label.text}")
+                save_to_csv(data)
+            # time.sleep(0.1)
+        
+        except serial.SerialException as e:
+            print(f"\n Errir: Could not connect to {port}")
+            
+                    
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7:smart-agric/kivy-app/newMain.py
+=======
+>>>>>>> 61fa8401949ae4fd9e1026bdcc35df67dc39e3a7
 
 
 class SmartAgricApp(App):
