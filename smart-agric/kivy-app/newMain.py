@@ -24,9 +24,9 @@ SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
 
 # MQTT Configuration
-BROKER = "f3150d0d05ce46d0873bf1a69c56ff38.s1.eu.hivemq.cloud"  # e.g., HiveMQ Cloud URL
+BROKER = "0a20ea7f057042b7820dbc6e79c4f9ad.s1.eu.hivemq.cloud"  # e.g., HiveMQ Cloud URL
 PORT = 8883  # Use 8883 for TLS, 1883 for non-TLS
-USERNAME = "Ayodeji"
+USERNAME = "Ayodeji63"
 PASSWORD = "cand4f694a@A"
 TOPIC = "agripal/farm1/sensor1"
 
@@ -34,7 +34,8 @@ TOPIC = "agripal/farm1/sensor1"
 DEVICE_ID = "sensor_1"
 FARM_ID = "farm1"
 
-
+SUPABASE_URL = "https://jgqfpjmzzfevxbtbegfq.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpncWZwam16emZldnhidGJlZ2ZxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjkyMTIwMSwiZXhwIjoyMDc4NDk3MjAxfQ.Bjw-YtulJ4z8bY5w8acxqZ8nIwxZAURs6aa5ddi0QZY"
 
 data_queue = queue.Queue()
 

@@ -12,9 +12,10 @@ const PORT = 3001;
 
 const MQTT_CONFIG = {
     protocol: 'mqtts',
-    host: 'f3150d0d05ce46d0873bf1a69c56ff38.s1.eu.hivemq.cloud', // Update this
+    // f3150d0d05ce46d0873bf1a69c56ff38.s1.eu.hivemq.cloud
+    host: '0a20ea7f057042b7820dbc6e79c4f9ad.s1.eu.hivemq.cloud', // Update this
     port: 8883,
-    username: 'Ayodeji',  // Update this
+    username: 'Ayodeji63',  // Update this
     password: 'cand4f694a@A',  // Update this
     clientId: `agripal_backend_${Math.random().toString(16).substr(2, 8)}`,
     clean: true,
