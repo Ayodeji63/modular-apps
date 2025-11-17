@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 92 30% 97%;
+    --foreground: 140 45% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 140 45% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 140 45% 15%;
+
+    --primary: 106 87% 50%;
+    --primary-foreground: 140 60% 8%;
+
+    --secondary: 40 35% 85%;
+    --secondary-foreground: 30 40% 25%;
+
+    --muted: 92 20% 92%;
+    --muted-foreground: 140 20% 45%;
+
+    --accent: 35 60% 65%;
+    --accent-foreground: 30 40% 20%;
+
+    --success: 140 70% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 45 93% 58%;
+    --warning-foreground: 30 40% 20%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 92 30% 88%;
+    --input: 92 30% 88%;
+    --ring: 106 87% 50%;
+
+    --radius: 0.75rem;
+
+    --chart-1: 106 87% 50%;
+    --chart-2: 140 70% 45%;
+    --chart-3: 35 60% 65%;
+    --chart-4: 45 93% 58%;
+    --chart-5: 92 30% 70%;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 140 45% 15%;
+    --sidebar-primary: 106 87% 50%;
+    --sidebar-primary-foreground: 140 60% 8%;
+    --sidebar-accent: 92 20% 92%;
+    --sidebar-accent-foreground: 140 45% 15%;
+    --sidebar-border: 92 30% 88%;
+    --sidebar-ring: 106 87% 50%;
+  }
+
+  .dark {
+    --background: 140 60% 8%;
+    --foreground: 92 25% 92%;
+
+    --card: 140 50% 12%;
+    --card-foreground: 92 25% 92%;
+
+    --popover: 140 50% 12%;
+    --popover-foreground: 92 25% 92%;
+
+    --primary: 106 87% 50%;
+    --primary-foreground: 140 60% 8%;
+
+    --secondary: 30 30% 20%;
+    --secondary-foreground: 40 35% 85%;
+
+    --muted: 140 30% 18%;
+    --muted-foreground: 92 20% 65%;
+
+    --accent: 35 50% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 140 60% 40%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 45 85% 50%;
+    --warning-foreground: 30 40% 20%;
+
+    --destructive: 0 75% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 140 30% 20%;
+    --input: 140 30% 20%;
+    --ring: 106 87% 50%;
+
+    --chart-1: 106 87% 50%;
+    --chart-2: 140 60% 40%;
+    --chart-3: 35 50% 45%;
+    --chart-4: 45 85% 50%;
+    --chart-5: 92 20% 35%;
+
+    --sidebar-background: 140 55% 10%;
+    --sidebar-foreground: 92 25% 92%;
+    --sidebar-primary: 106 87% 50%;
+    --sidebar-primary-foreground: 140 60% 8%;
+    --sidebar-accent: 140 30% 18%;
+    --sidebar-accent-foreground: 92 25% 92%;
+    --sidebar-border: 140 30% 20%;
+    --sidebar-ring: 106 87% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fade-in 0.5s ease-out;
+  }
+
+  .animate-slide-up {
+    animation: slide-up 0.5s ease-out;
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
