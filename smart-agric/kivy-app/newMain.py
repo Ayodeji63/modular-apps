@@ -21,7 +21,7 @@ from threading import Thread
 import queue
 
 SERIAL_PORT = '/dev/ttyUSB0'
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 
 # MQTT Configuration
 BROKER = "0a20ea7f057042b7820dbc6e79c4f9ad.s1.eu.hivemq.cloud"  # e.g., HiveMQ Cloud URL

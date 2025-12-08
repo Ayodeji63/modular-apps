@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
 import "@radix-ui/themes/styles.css";
 import { Theme } from "@radix-ui/themes";
+import Security from "./pages/Security";
 
 const queryClient = new QueryClient();
 const App = () => {
@@ -55,6 +56,8 @@ const App = () => {
                 <Route path="/ai-assistant" element={<AIAssistant />} />
                 <Route path="/nasa-insights" element={<NASAInsights />} />
                 <Route path="/notifications" element={<Notifications />} />
+                <Route path="/securities" element={<Security />} />
+
                 <Route path="/settings" element={<Settings />} />
                 {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
                 <Route path="*" element={<NotFound />} />
