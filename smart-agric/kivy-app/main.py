@@ -1,38 +1,382 @@
 from kivy.app import App
-from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
-from kivy.uix.button import Button
 from kivy.uix.widget import Widget
 from kivy.animation import Animation
 from kivy.graphics import Color, Rectangle, Ellipse, Line
-from kivy.properties import NumericProperty
+from kivy.properties import NumericProperty, StringProperty
 from kivy.clock import Clock
-from kivy_garden.graph import Graph, MeshLinePlot
+from supabase import create_client, Client
+
+import os
+import atexit
+
+# Force gpiozero to use the robust pigpio factory
+os.environ['GPIOZERO_PIN_FACTORY'] = 'pigpio'
+
 
 import serial
 import json 
 import time
-import os
 from datetime import datetime
+import paho.mqtt.client as mqtt
+import json
+import time
+import random
+from threading import Thread
+import queue
+from gpiozero import OutputDevice
+from time import sleep
 
 SERIAL_PORT = '/dev/ttyUSB0'
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 
+pump_relay = None
+
+# MQTT Configuration
+BROKER = "0a20ea7f057042b7820dbc6e79c4f9ad.s1.eu.hivemq.cloud"  # e.g., HiveMQ Cloud URL
+PORT = 8883  # Use 8883 for TLS, 1883 for non-TLS
+USERNAME = "Ayodeji63"
+PASSWORD = "cand4f694a@A"
+TOPIC = "agripal/farm1/sensor1"
+
+#Device Info
+DEVICE_ID = "sensor_1"
+FARM_ID = "farm1"
+
+SUPABASE_URL = "https://jgqfpjmzzfevxbtbegfq.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpncWZwam16emZldnhidGJlZ2ZxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjkyMTIwMSwiZXhwIjoyMDc4NDk3MjAxfQ.Bjw-YtulJ4z8bY5w8acxqZ8nIwxZAURs6aa5ddi0QZY"
+
+data_queue = queue.Queue()
+
+def cleanup_gpio():
+    """Force pump off when script exits"""
+    global pump_relay
+    if pump_relay:
+        print("\n🧹 CLEANUP: Force stopping pump...")
+        try:
+            # Check if the device is active before trying to command it
+            if not pump_relay.closed:
+                pump_relay.off()
+                pump_relay.close()
+                print("   -> Pump stopped successfully.")
+        except AttributeError:
+            # This specific error means the Connection is already dead.
+            # We can't turn the pump off because the bridge to the Pi is gone.
+            print("   -> GPIO connection was already closed (Race Condition ignored).")
+        except Exception as e:
+            print(f"   -> Cleanup warning: {e}")
+
+# 2. REGISTER THE CLEANUP FUNCTION
+atexit.register(cleanup_gpio)
+
+class SUPABASEPublisher:
+    """Upload to Supabase with background thread"""
+    
+    def __init__(self, url, key):
+        self.url = url
+        self.key = key
+        self.supabase = create_client(self.url, self.key)
+        self.queue = queue.Queue()
+        self.running = False
+        self.upload_thread = None
+    
+    def start(self):
+        """Start background upload thread"""
+        self.running = True
+        self.upload_thread = Thread(target=self._upload_worker, daemon=True)
+        self.upload_thread.start()
+        print("Supabase uploader started")
+    
+    def save_to_supabase(self, data):
+        """Save sensor data to Supabase in real-time"""    
+        try:
+            record = {
+                'device_id': DEVICE_ID,
+                'farm_id': FARM_ID,
+                'timestamp': datetime.now().isoformat(),
+                'raw_value': data['raw'],
+                'moisture': data['moisture'],
+                'temperature': data['temperature'],
+                'humidity': data['humidity'],
+                'status': 'wet'
+            }
+            
+            self.queue.put(record)
+        except Exception as e:
+            print(f"Supabase error: {e}")
+    
+    def _upload_worker(self):
+        """Background worker that uploads batches"""
+        batch = []
+        while self.running:
+            try:
+                timeout = time.time() + 30
+                while len(batch) < 20 and time.time() < timeout:
+                    try:
+                        record = self.queue.get(timeout=1)
+                        batch.append(record)
+                    except queue.Empty:
+                        continue
+                
+                if batch:
+                    self.supabase.table('sensor_readings').insert(batch).execute()
+                    print(f"Uploaded {len(batch)} records")
+                    batch = []
+            
+            except Exception as e:
+                print(f"Upload error: {e}")
+                time.sleep(5)
+    
+    def stop(self):
+        """Stop uploader and flush remaining data"""
+        self.running = False
+        
+        remaining = []
+        while not self.queue.empty():
+            try:
+                remaining.append(self.queue.get_nowait())
+            except queue.Empty:
+                break
+        
+        if remaining:
+            try:
+                self.supabase.table('sensor_readings').insert(remaining).execute()
+                print(f"Flished {len(remaining)} records")
+            except Exception as e:
+                print(f"Final flush failed: {e}")
+                        
+class MQTTPublisher:
+    """Seperate class to manage MQTT connection"""
+    def __init__(self):
+        self.client = None
+        self.connected = False
+        self.setup_client()
+    
+    def setup_client(self):
+        """Initialize MQTT client with proper callbacks"""
+        self.client = mqtt.Client(
+            client_id=f"raspberry_pi_{DEVICE_ID}",
+            callback_api_version = mqtt.CallbackAPIVersion.VERSION2,
+            protocol=mqtt.MQTTv5
+        ) 
+        
+        self.client.username_pw_set(USERNAME, PASSWORD)
+        self.client.tls_set()
+        
+        self.client.on_connect = self.on_connect
+        self.client.on_disconnect = self.on_disconnect
+        self.client.on_publish = self.on_publish
+        self.client.on_message = self.on_message
+
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        """Callback when connected"""
+        if reason_code == 0:
+            print("Connected to MQTT Broker")
+            self.connected = True
+            
+            command_topic = f"agripal/{FARM_ID}/{DEVICE_ID}/command"
+            self.client.subscribe(command_topic)
+            print(f"Listening for commands on: {command_topic}")
+        else:
+            print(f"Failed to connect, return code {reason_code}")
+            self.connected = False
+    
+    def on_disconnect(self, client, userdata, flags, reason_code, properties):
+        """Callback when disconnected"""
+        print(f"Disconnected from MQTT Broker (code: {reason_code})")
+        self.connected = False
+    
+    def on_publish(self, client, userdata, mid, reason_code, properties):
+        """Callback when message is published"""
+        print(f"Message {mid} published")
+    
+    def connect(self):
+        """Connect to MQTT broker"""
+        try:
+            self.client.connect(BROKER, PORT, keepalive=60)
+            self.client.loop_start()
+            
+            timeout = 5
+            start_time = time.time()
+            while not self.connected and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+            
+            return self.connected
+        except Exception as e:
+            print(f"Connection error: {e}")
+            return False
+    
+    def publish(self, temperature, humidity, moisture):
+        """Publish sensor data to MQTT"""
+        if not self.connected:
+            print("Not connected to MQTT broker")
+            return False
+        
+        try:
+            sensor_data = {
+                "device_id": DEVICE_ID,
+                "farm_id": FARM_ID,
+                "timestamp": int(time.time()),
+                "soil_moisture": float(moisture),
+                "temperature": float(temperature),
+                "humidity": float(humidity),
+                "ph_level": 7.0,
+                "nitrogen": 100.0
+            }
+            
+            payload = json.dumps(sensor_data)
+            result = self.client.publish(TOPIC, payload, qos=1)
+            
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                print(f"Published M:{moisture}% T:{temperature}C H:{humidity}%")
+                return True
+            else:
+                print(f"Publish failed with code: {result.rc}")
+                return False
+        
+        except Exception as e:
+            print(f"Failed to publish sensor data: {e}")
+            return False
+    def on_message(self, client, userdata, msg):
+        """Handle incoming commands from Web App"""
+        try:
+            print(f"📩 Command Received: {msg.topic}")
+            payload = json.loads(msg.payload.decode())
+            
+            if payload.get('type') == 'PUMP_CONTROL':
+                action = payload.get('action')
+                
+                # ACCESS THE GLOBAL PUMP RELAY
+                global pump_relay
+                
+                if pump_relay:
+                    if action == "ON":
+                        print("🌊 REMOTE COMMAND: Turning Pump ON")
+                        pump_relay.on()
+                    elif action == "OFF":
+                        print("🛑 REMOTE COMMAND: Turning Pump OFF")
+                        pump_relay.off()
+                        
+        except Exception as e:
+            print(f"❌ Error processing command: {e}")
+    
+    def disconnect(self):
+        """Disconnect from MQTT broker"""
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.connected = False
+            print("Disconnected from MQTT")      
+
+class SerialReader:
+    """Separate class to handle serial communication"""
+    
+    def __init__(self, port, baudrate):
+        self.port = port
+        self.baudrate = baudrate
+        self.serial = None
+        self.running = False
+    
+    def connect(self):
+        """Connect to serial port"""
+        try:
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+            self.serial = serial.Serial(self.port, self.baudrate, timeout=2)
+            time.sleep(2)  # Wait for Arduino to initialize
+            self.serial.flushInput()
+            print(f"✅ Connected to serial port: {self.port}")
+            return True
+        except serial.SerialException as e:
+            print(f"❌ Could not connect to {self.port}: {e}")
+            return False
+    
+    def read_data(self):
+        """Read and parse JSON data from Arduino"""
+        if not self.serial or not self.serial.is_open:
+            return None
+        try:
+            if self.serial.in_waiting > 0:
+                line = self.serial.readline().decode("utf-8").strip()
+            
+                if not line.startswith('{'):
+                    return None
+                data = json.loads(line)
+                return data
+        
+        except (serial.SerialException, OSError):
+            print("Serial Connection Lost! Reconnection...")
+            self.serial.close()
+            return "RECONNECT_NEEDED"
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON decode error: {e}")
+            return None
+        except UnicodeDecodeError:
+            return None
+        except Exception as e:
+            print(f"❌ Error reading from serial: {e}")
+            return None
+    
+    def start_reading(self, data_queue):
+        """Start reading in a separate thread"""
+        self.running = True
+        
+        def read_loop():
+            while self.running:
+                data = self.read_data()
+                if data == "RECONNECT_NEEDED":
+                    time.sleep(2)
+                    self.connect()
+                elif data:
+                    data_queue.put(data)
+                time.sleep(0.1)
+        
+        thread = Thread(target=read_loop, daemon=True)
+        thread.start()
+    
+    def stop(self):
+        """Stop reading and close serial port"""
+        self.running = False
+        if self.serial:
+            self.serial.close()
+            print("👋 Serial port closed")
+      
 
 def read_sensor_data(ser):
     """Read and parse JSON data from Arduino"""
+    
     try:
+        # Read one line from serial
         line = ser.readline().decode("utf-8").strip()
+        
+        # Skip non-JSON lines (startup messages, etc.)
         if not line.startswith('{'):
             return None
+        
+        # parse JSON data
         data = json.loads(line)
         return data
-    except:
+    
+    except json.JSONDecodeError:
+        print("Failed to decode JSON:", line)
+        return None
+    except UnicodeDecodeError:
+        return None
+    except Exception as e:
+        print("Error reading from serial:", e)
         return None
 
+# def save_to_csv(data):
+#     """Save data to CSV file for logging"""
+#     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+#     try:
+#         with open('sensor_log.csv', 'a') as f:
+#             f.write(f"{timestamp},{data['raw']},{data['moisture']},{data['temperature']},{data['humidity']},{data['status']}\n")
+#     except Exception as e:
+#         print(f"❌ Error saving to CSV: {e}")
 
 def save_to_csv(data):
     """Save data as JSON to file"""
@@ -53,156 +397,95 @@ def save_to_csv(data):
         
     except Exception as e:
         print(f"Error saving: {e}")
-
-
-def load_sensor_data(filename='sensor_log.jsonl'):
-    """Load sensor data from JSON lines file"""
-    data = []
-    
-    if not os.path.exists(filename):
-        return generate_sample_data()
-    
-    try:
-        with open(filename, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    data.append(entry)
-                except:
-                    continue
         
-        return data if data else generate_sample_data()
-    except:
-        return generate_sample_data()
-
-
-def generate_sample_data():
-    """Generate sample data"""
-    import random
-    from datetime import datetime, timedelta
-    
-    data = []
-    start_time = datetime.now() - timedelta(hours=24)
-    
-    for i in range(100):
-        timestamp = start_time + timedelta(minutes=i * 15)
-        moisture = 40 + random.randint(-20, 40)
-        temp = 25 + random.randint(-5, 10)
-        humidity = 50 + random.randint(-15, 25)
-        
-        data.append({
-            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-            'raw': random.randint(300, 700),
-            'moisture': max(0, min(100, moisture)),
-            'temperature': temp,
-            'humidity': max(0, min(100, humidity)),
-            'status': 'WET' if moisture > 60 else ('MOIST' if moisture > 30 else 'DRY')
-        })
-    
-    return data
-
-
-def analyze_data(data):
-    """Analyze sensor data and generate insights"""
-    if not data:
-        return {
-            'avg_moisture': 0, 'avg_temp': 0, 'avg_humidity': 0,
-            'min_moisture': 0, 'max_moisture': 0, 'dry_periods': 0,
-            'total_readings': 0,
-            'insights': ["No data available yet!"]
-        }
-    
-    moistures = [d['moisture'] for d in data]
-    temps = [d['temperature'] for d in data]
-    humidities = [d['humidity'] for d in data]
-    
-    avg_moisture = sum(moistures) / len(moistures)
-    avg_temp = sum(temps) / len(temps)
-    avg_humidity = sum(humidities) / len(humidities)
-    
-    dry_periods = sum(1 for m in moistures if m < 30)
-    
-    insights = []
-    
-    if avg_moisture < 40:
-        insights.append(f"WARNING: Low moisture ({avg_moisture:.1f}%). Water more frequently!")
-    elif avg_moisture > 70:
-        insights.append(f"HIGH moisture ({avg_moisture:.1f}%). Reduce watering.")
-    else:
-        insights.append(f"OPTIMAL moisture ({avg_moisture:.1f}%). Great job!")
-    
-    if dry_periods > len(data) * 0.3:
-        insights.append(f"{dry_periods} critical dry periods detected!")
-    
-    if avg_temp > 30:
-        insights.append(f"High temperature ({avg_temp:.1f}C). Consider shade.")
-    elif avg_temp < 18:
-        insights.append(f"Low temperature ({avg_temp:.1f}C). Protect from cold.")
-    
-    insights.append(f"Monitored {len(data)} data points.")
-    
-    return {
-        'avg_moisture': avg_moisture, 'avg_temp': avg_temp,
-        'avg_humidity': avg_humidity, 'min_moisture': min(moistures),
-        'max_moisture': max(moistures), 'dry_periods': dry_periods,
-        'total_readings': len(data), 'insights': insights
-    }
-
-
 class AnimatedFace(Widget):
     moisture_level = NumericProperty(50)
     
-    def __init__(self, **kwargs):
+    def __init__(self, pump_relay_ref, **kwargs):
         super().__init__(**kwargs)
+        
+        self.pump_relay = pump_relay_ref
+        self.pump_start_time = 0
+        
+        
+        # Background color (changes based on emotion)
         self.bg_color = None
         self.bg_rect = None
+        
+        # Graphics references
         self.left_eye = None
         self.right_eye = None
         self.left_eye_color = None
         self.right_eye_color = None
+        
+        # Eye highlights (for shine effect)
         self.left_eye_highlight = None
         self.right_eye_highlight = None
+        
+        # Eyebrows
         self.left_brow = None
         self.right_brow = None
         self.left_brow_color = None
         self.right_brow_color = None
+        
+        # Eyelashes
         self.left_lashes = []
         self.right_lashes = []
+        
+        # Cheeks
         self.left_cheek = None
         self.right_cheek = None
         self.left_cheek_color = None
         self.right_cheek_color = None
+        
         self.mouth_color = None
         self.mouth = None
         self.tear = None
         self.tear_color = None
+        
         self.is_blinking = False
         self.original_eye_size = 0
         
         self.draw_face()
+        
         self.bind(moisture_level=self.update_expression)
         self.bind(pos=self.redraw, size=self.redraw)
+        
         Clock.schedule_interval(self.blink, 3)
     
     def draw_face(self):
         self.canvas.clear()
         
         with self.canvas.before:
-            self.bg_color = Color(0.85, 0.95, 0.95, 1)
+            # Background fills entire screen
+            self.bg_color = Color(0.85, 0.95, 0.95, 1)  # Light cyan/white
             self.bg_rect = Rectangle(pos=self.pos, size=self.size)
         
         with self.canvas:
+            # Calculate face area (central 80% of screen)
+            face_width = self.width * 0.8
+            face_height = self.height * 0.7
+            face_x = self.x + (self.width - face_width) / 2
+            face_y = self.y + (self.height - face_height) / 2
+            
             center_x = self.x + self.width / 2
             center_y = self.y + self.height / 2
+            
+            # Eye size based on screen
             self.original_eye_size = min(self.width, self.height) * 0.12
             eye_size = self.original_eye_size
+            
+            # Eye spacing
             eye_spacing = self.width * 0.15
             
+            # Eyebrows
             self.left_brow_color = Color(0.2, 0.2, 0.2, 1)
             self.left_brow = Line(points=[], width=5)
+            
             self.right_brow_color = Color(0.2, 0.2, 0.2, 1)
             self.right_brow = Line(points=[], width=5)
             
+            # Left Eye
             self.left_eye_color = Color(0.1, 0.1, 0.1, 1)
             self.left_eye = Ellipse(
                 pos=(center_x - eye_spacing - eye_size/2, 
@@ -210,6 +493,7 @@ class AnimatedFace(Widget):
                 size=(eye_size, eye_size)
             )
             
+            # Left eye highlight (white shine)
             Color(1, 1, 1, 1)
             self.left_eye_highlight = Ellipse(
                 pos=(center_x - eye_spacing - eye_size/2 + eye_size * 0.3, 
@@ -217,6 +501,7 @@ class AnimatedFace(Widget):
                 size=(eye_size * 0.35, eye_size * 0.35)
             )
             
+            # Right Eye
             self.right_eye_color = Color(0.1, 0.1, 0.1, 1)
             self.right_eye = Ellipse(
                 pos=(center_x + eye_spacing - eye_size/2, 
@@ -224,6 +509,7 @@ class AnimatedFace(Widget):
                 size=(eye_size, eye_size)
             )
             
+            # Right eye highlight
             Color(1, 1, 1, 1)
             self.right_eye_highlight = Ellipse(
                 pos=(center_x + eye_spacing - eye_size/2 + eye_size * 0.3, 
@@ -231,8 +517,10 @@ class AnimatedFace(Widget):
                 size=(eye_size * 0.35, eye_size * 0.35)
             )
             
+            # Eyelashes
             self.draw_eyelashes(center_x, center_y, eye_spacing, eye_size)
             
+            # Cheeks
             cheek_size = self.width * 0.08
             self.left_cheek_color = Color(1, 0.7, 0.75, 0)
             self.left_cheek = Ellipse(
@@ -248,9 +536,11 @@ class AnimatedFace(Widget):
                 size=(cheek_size, cheek_size * 0.7)
             )
             
+            # Mouth
             self.mouth_color = Color(0.2, 0.2, 0.2, 1)
             self.mouth = Line(points=[], width=4)
             
+            # Tear
             self.tear_color = Color(0.3, 0.6, 1, 0)
             self.tear = Ellipse(
                 pos=(center_x + eye_spacing + eye_size * 0.8, center_y),
@@ -260,31 +550,38 @@ class AnimatedFace(Widget):
         self.update_expression()
     
     def draw_eyelashes(self, center_x, center_y, eye_spacing, eye_size):
+        """Draw eyelashes"""
         lash_length = eye_size * 0.6
         eye_y = center_y + self.height * 0.08 + eye_size/2
         
+        # Left eye lashes
         left_eye_x = center_x - eye_spacing
         Color(0.1, 0.1, 0.1, 1)
         for i in range(4):
             offset_x = (i - 1.5) * eye_size * 0.25
             angle_offset = (i - 1.5) * 0.15
             lash = Line(
-                points=[left_eye_x + offset_x, eye_y,
-                       left_eye_x + offset_x - lash_length * angle_offset, 
-                       eye_y + lash_length],
+                points=[
+                    left_eye_x + offset_x, eye_y,
+                    left_eye_x + offset_x - lash_length * angle_offset, 
+                    eye_y + lash_length
+                ],
                 width=2.5
             )
             self.left_lashes.append(lash)
         
+        # Right eye lashes
         right_eye_x = center_x + eye_spacing
         Color(0.1, 0.1, 0.1, 1)
         for i in range(4):
             offset_x = (i - 1.5) * eye_size * 0.25
             angle_offset = (i - 1.5) * 0.15
             lash = Line(
-                points=[right_eye_x + offset_x, eye_y,
-                       right_eye_x + offset_x + lash_length * angle_offset, 
-                       eye_y + lash_length],
+                points=[
+                    right_eye_x + offset_x, eye_y,
+                    right_eye_x + offset_x + lash_length * angle_offset, 
+                    eye_y + lash_length
+                ],
                 width=2.5
             )
             self.right_lashes.append(lash)
@@ -300,24 +597,46 @@ class AnimatedFace(Widget):
         
         left_eye_x, left_eye_y = self.left_eye.pos
         right_eye_x, right_eye_y = self.right_eye.pos
+        left_high_x, left_high_y = self.left_eye_highlight.pos
+        right_high_x, right_high_y = self.right_eye_highlight.pos
         
-        close_anim = Animation(size=(self.original_eye_size, 3),
-                              pos=(left_eye_x, left_eye_y + self.original_eye_size/2),
-                              duration=0.08)
-        close_anim2 = Animation(size=(self.original_eye_size, 3),
-                               pos=(right_eye_x, right_eye_y + self.original_eye_size/2),
-                               duration=0.08)
+        # Close eyes
+        close_anim = Animation(
+            size=(self.original_eye_size, 3),
+            pos=(left_eye_x, left_eye_y + self.original_eye_size/2),
+            duration=0.08
+        )
+        close_anim2 = Animation(
+            size=(self.original_eye_size, 3),
+            pos=(right_eye_x, right_eye_y + self.original_eye_size/2),
+            duration=0.08
+        )
+        
+        # Hide highlights during blink
         hide_high = Animation(size=(0, 0), duration=0.08)
         hide_high2 = Animation(size=(0, 0), duration=0.08)
         
-        open_anim = Animation(size=(self.original_eye_size, self.original_eye_size),
-                             pos=(left_eye_x, left_eye_y), duration=0.08)
-        open_anim2 = Animation(size=(self.original_eye_size, self.original_eye_size),
-                              pos=(right_eye_x, right_eye_y), duration=0.08)
-        show_high = Animation(size=(self.original_eye_size * 0.35, self.original_eye_size * 0.35),
-                             duration=0.08)
-        show_high2 = Animation(size=(self.original_eye_size * 0.35, self.original_eye_size * 0.35),
-                              duration=0.08)
+        # Open eyes
+        open_anim = Animation(
+            size=(self.original_eye_size, self.original_eye_size),
+            pos=(left_eye_x, left_eye_y),
+            duration=0.08
+        )
+        open_anim2 = Animation(
+            size=(self.original_eye_size, self.original_eye_size),
+            pos=(right_eye_x, right_eye_y),
+            duration=0.08
+        )
+        
+        # Show highlights
+        show_high = Animation(
+            size=(self.original_eye_size * 0.35, self.original_eye_size * 0.35),
+            duration=0.08
+        )
+        show_high2 = Animation(
+            size=(self.original_eye_size * 0.35, self.original_eye_size * 0.35),
+            duration=0.08
+        )
         
         sequence = close_anim + open_anim
         sequence2 = close_anim2 + open_anim2
@@ -339,32 +658,50 @@ class AnimatedFace(Widget):
         mouth_width = self.width * 0.25
         
         if self.moisture_level > 60:
+            # Happy - GREEN BACKGROUND
             self.draw_happy_mouth(center_x, center_y, mouth_width)
             self.draw_happy_eyebrows(center_x, center_y)
-            self.animate_background_color((0.3, 0.95, 0.4, 1))
+            self.animate_background_color((0.3, 0.95, 0.4, 1))  # Bright green
             self.show_cheeks()
             self.hide_tear()
+            if self.pump_relay:
+                self.pump_relay.off()
+                print("Pump OFF - Moisture good")
+            
         elif self.moisture_level > 30:
+            # Worried - YELLOW BACKGROUND
             self.draw_worried_mouth(center_x, center_y, mouth_width)
             self.draw_worried_eyebrows(center_x, center_y)
-            self.animate_background_color((1, 0.95, 0.3, 1))
+            self.animate_background_color((1, 0.95, 0.3, 1))  # Bright yellow
             self.hide_cheeks()
             self.hide_tear()
+            if self.pump_relay:
+                self.pump_relay.off()
+                print("Pump OFF - Moisture good")
+            
         else:
+            # Sad - RED BACKGROUND
             self.draw_sad_mouth(center_x, center_y, mouth_width)
             self.draw_sad_eyebrows(center_x, center_y)
-            self.animate_background_color((1, 0.4, 0.4, 1))
+            self.animate_background_color((1, 0.4, 0.4, 1))  # Bright red
             self.hide_cheeks()
             self.show_tear(center_x, center_y)
+            if self.pump_relay:
+                self.pump_relay.on()
+                print("Pump OFF - Moisture good")
     
     def animate_background_color(self, target_color):
-        Animation(rgba=target_color, duration=0.3).start(self.bg_color)
+        """Animate the background color change"""
+        anim = Animation(rgba=target_color, duration=0.5)
+        anim.start(self.bg_color)
     
     def draw_happy_eyebrows(self, center_x, center_y):
+        """Raised, curved eyebrows"""
         eye_spacing = self.width * 0.15
         brow_y = center_y + self.height * 0.18
         brow_width = self.width * 0.08
         
+        # Left brow
         left_points = []
         for i in range(8):
             x = center_x - eye_spacing - brow_width/2 + (brow_width * i / 7)
@@ -373,6 +710,7 @@ class AnimatedFace(Widget):
             left_points.extend([x, y])
         self.left_brow.points = left_points
         
+        # Right brow
         right_points = []
         for i in range(8):
             x = center_x + eye_spacing - brow_width/2 + (brow_width * i / 7)
@@ -382,350 +720,274 @@ class AnimatedFace(Widget):
         self.right_brow.points = right_points
     
     def draw_worried_eyebrows(self, center_x, center_y):
+        """Concerned eyebrows"""
         eye_spacing = self.width * 0.15
         brow_y = center_y + self.height * 0.18
         brow_width = self.width * 0.08
         
-        self.left_brow.points = [
+        # Left brow (slightly raised)
+        left_points = [
             center_x - eye_spacing - brow_width/2, brow_y,
             center_x - eye_spacing + brow_width/2, brow_y + self.height * 0.015
         ]
-        self.right_brow.points = [
+        self.left_brow.points = left_points
+        
+        # Right brow
+        right_points = [
             center_x + eye_spacing - brow_width/2, brow_y + self.height * 0.015,
             center_x + eye_spacing + brow_width/2, brow_y
         ]
+        self.right_brow.points = right_points
     
     def draw_sad_eyebrows(self, center_x, center_y):
+        """Droopy sad eyebrows"""
         eye_spacing = self.width * 0.15
         brow_y = center_y + self.height * 0.18
         brow_width = self.width * 0.08
         
-        self.left_brow.points = [
+        # Left brow
+        left_points = [
             center_x - eye_spacing - brow_width/2, brow_y,
             center_x - eye_spacing + brow_width/2, brow_y - self.height * 0.02
         ]
-        self.right_brow.points = [
+        self.left_brow.points = left_points
+        
+        # Right brow
+        right_points = [
             center_x + eye_spacing - brow_width/2, brow_y - self.height * 0.02,
             center_x + eye_spacing + brow_width/2, brow_y
         ]
+        self.right_brow.points = right_points
     
     def draw_happy_mouth(self, center_x, center_y, width):
         mouth_y = center_y - self.height * 0.12
+        num_points = 20
         points = []
-        for i in range(20):
-            x = center_x - width/2 + (width * i / 19)
-            progress = (i / 19) - 0.5
+        for i in range(num_points):
+            x = center_x - width/2 + (width * i / (num_points - 1))
+            progress = (i / (num_points - 1)) - 0.5
             y = mouth_y - (width * 0.4) * (1 - 4 * progress * progress)
             points.extend([x, y])
         self.mouth.points = points
     
     def draw_worried_mouth(self, center_x, center_y, width):
         mouth_y = center_y - self.height * 0.15
-        self.mouth.points = [center_x - width/2, mouth_y, center_x + width/2, mouth_y]
+        points = [
+            center_x - width/2, mouth_y,
+            center_x + width/2, mouth_y
+        ]
+        self.mouth.points = points
     
     def draw_sad_mouth(self, center_x, center_y, width):
         mouth_y = center_y - self.height * 0.12
+        num_points = 20
         points = []
-        for i in range(20):
-            x = center_x - width/2 + (width * i / 19)
-            progress = (i / 19) - 0.5
+        for i in range(num_points):
+            x = center_x - width/2 + (width * i / (num_points - 1))
+            progress = (i / (num_points - 1)) - 0.5
             y = mouth_y + (width * 0.4) * (1 - 4 * progress * progress)
             points.extend([x, y])
         self.mouth.points = points
     
     def show_cheeks(self):
-        Animation(a=0.5, duration=0.5).start(self.left_cheek_color)
-        Animation(a=0.5, duration=0.5).start(self.right_cheek_color)
+        """Show rosy cheeks"""
+        anim = Animation(a=0.5, duration=0.5)
+        anim.start(self.left_cheek_color)
+        anim.start(self.right_cheek_color)
     
     def hide_cheeks(self):
-        Animation(a=0, duration=0.3).start(self.left_cheek_color)
-        Animation(a=0, duration=0.3).start(self.right_cheek_color)
+        """Hide cheeks"""
+        anim = Animation(a=0, duration=0.3)
+        anim.start(self.left_cheek_color)
+        anim.start(self.right_cheek_color)
     
     def show_tear(self, center_x, center_y):
         eye_spacing = self.width * 0.15
         self.tear.pos = (center_x + eye_spacing + self.original_eye_size * 0.6, center_y)
-        Animation(a=1, duration=0.5).start(self.tear_color)
-        Animation(pos=(self.tear.pos[0], self.tear.pos[1] - self.height * 0.2),
-                 duration=1.5, t='in_quad').start(self.tear)
+        
+        anim = Animation(a=1, duration=0.5)
+        anim.start(self.tear_color)
+        
+        tear_drop = Animation(
+            pos=(self.tear.pos[0], self.tear.pos[1] - self.height * 0.2),
+            duration=1.5,
+            t='in_quad'
+        )
+        tear_drop.start(self.tear)
     
     def hide_tear(self):
-        Animation(a=0, duration=0.3).start(self.tear_color)
+        anim = Animation(a=0, duration=0.3)
+        anim.start(self.tear_color)
     
     def animate_to_level(self, new_level):
-        Animation(moisture_level=new_level, duration=0.3, t='in_out_quad').start(self)
+        anim = Animation(moisture_level=new_level, duration=1, t='in_out_quad')
+        anim.start(self)
 
 
-class MainMonitorScreen(Screen):
+class SmartAgricDashboard(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        layout = FloatLayout()
+        self.plant_name = "Tommy"
         
-        self.face = AnimatedFace(size_hint=(1, 1), pos_hint={'x': 0, 'y': 0})
-        layout.add_widget(self.face)
+        global pump_relay
         
-        # Analytics button
-        analytics_btn = Button(
-            text='View Analytics',
-            size_hint=(None, None),
-            size=(180, 60),
-            pos_hint={'center_x': 0.5, 'y': 0.45},
-            background_color=(0.3, 0.6, 0.9, 0.9),
-            bold=True,
-            font_size='18sp'
+        # Initialize MQTT and Serial
+        self.mqtt_publisher = MQTTPublisher()
+        self.serial_reader = SerialReader(SERIAL_PORT, BAUD_RATE)
+        self.supabase = SUPABASEPublisher(SUPABASE_URL, SUPABASE_KEY)
+        self.supabase.start()
+        
+        pump_relay = OutputDevice(17, active_high=True, initial_value=False)
+        
+        # Full screen face
+        self.face = AnimatedFace(
+            size_hint=(1, 1),
+            pump_relay_ref=pump_relay,
+            pos_hint={'x': 0, 'y': 0}
         )
-        analytics_btn.bind(on_press=self.go_to_analytics)
-        layout.add_widget(analytics_btn)
+        self.add_widget(self.face)
         
-        # Temperature
-        temp_layout = BoxLayout(orientation='vertical', size_hint=(None, None),
-                               size=(80, 100), pos_hint={'x': 0.02, 'top': 0.98})
-        temp_layout.add_widget(Label(text='T', font_size='50sp', bold=True,
-                                    color=(0.9, 0.3, 0.2, 1), size_hint=(1, 0.6)))
-        self.temp_value = Label(text='--C', font_size='22sp', bold=True,
-                               color=(0.2, 0.2, 0.2, 1), size_hint=(1, 0.4))
-        temp_layout.add_widget(self.temp_value)
-        layout.add_widget(temp_layout)
+        # Top left - Temperature
+        temp_display = BoxLayout(
+            orientation='vertical',
+            size_hint=(None, None),
+            size=(80, 100),
+            pos_hint={'x': 0.02, 'top': 0.98}
+        )
         
-        # Humidity
-        humid_layout = BoxLayout(orientation='vertical', size_hint=(None, None),
-                                size=(80, 100), pos_hint={'right': 0.98, 'top': 0.98})
-        humid_layout.add_widget(Label(text='H', font_size='50sp', bold=True,
-                                     color=(0.2, 0.5, 0.9, 1), size_hint=(1, 0.6)))
-        self.humidity_value = Label(text='--%', font_size='22sp', bold=True,
-                                   color=(0.2, 0.2, 0.2, 1), size_hint=(1, 0.4))
-        humid_layout.add_widget(self.humidity_value)
-        layout.add_widget(humid_layout)
+        temp_symbol = Label(
+            text='T',
+            font_size='50sp',
+            bold=True,
+            color=(0.9, 0.3, 0.2, 1),
+            size_hint=(1, 0.6)
+        )
+        self.temp_value = Label(
+            text='24C',
+            font_size='22sp',
+            bold=True,
+            color=(0.2, 0.2, 0.2, 1),
+            size_hint=(1, 0.4)
+        )
+        temp_display.add_widget(temp_symbol)
+        temp_display.add_widget(self.temp_value)
+        self.add_widget(temp_display)
         
-        # Moisture
-        self.moisture_label = Label(text='--%', font_size='56sp', bold=True,
-                                   color=(0.2, 0.2, 0.2, 1), size_hint=(None, None),
-                                   size=(200, 100), pos_hint={'center_x': 0.5, 'y': 0.02})
-        layout.add_widget(self.moisture_label)
+        # Top right - Humidity
+        humidity_display = BoxLayout(
+            orientation='vertical',
+            size_hint=(None, None),
+            size=(80, 100),
+            pos_hint={'right': 0.98, 'top': 0.98}
+        )
         
-        self.add_widget(layout)
+        humidity_symbol = Label(
+            text='H',
+            font_size='50sp',
+            bold=True,
+            color=(0.2, 0.5, 0.9, 1),
+            size_hint=(1, 0.6)
+        )
+        self.humidity_value = Label(
+            text='65%',
+            font_size='22sp',
+            bold=True,
+            color=(0.2, 0.2, 0.2, 1),
+            size_hint=(1, 0.4)
+        )
+        humidity_display.add_widget(humidity_symbol)
+        humidity_display.add_widget(self.humidity_value)
+        self.add_widget(humidity_display)
         
-        # Serial connection
-        self.ser = None
-        self.init_serial()
-        Clock.schedule_interval(self.read_sensor, 0.5)
+        # Bottom center - Moisture percentage
+        self.moisture_label = Label(
+            text='50%',
+            font_size='56sp',
+            bold=True,
+            color=(0.2, 0.2, 0.2, 1),
+            size_hint=(None, None),
+            size=(200, 100),
+            pos_hint={'center_x': 0.5, 'y': 0.02}
+        )
+        self.add_widget(self.moisture_label)
+        
+        # Start simulation
+        # Clock.schedule_interval(self.simulate_sensor_update, 5)
+        
+        # Connect to MQTT
+        Clock.schedule_once(self.initialize_connections, 1)
+        
+        Clock.schedule_interval(self.check_sensor_data, 0.5)
     
-    def init_serial(self):
-        try:
-            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-            time.sleep(2)
-            self.ser.flushInput()
-            print("Connected!")
-        except:
-            print("Simulation mode")
-            self.ser = None
-    
-    def read_sensor(self, dt):
-        if self.ser is None:
-            self.simulate_data(dt)
-            return
+    def initialize_connections(self, dt):
+        """Initialize MQTT and Serial connections"""
+        # connect to MQTT
+        if self.mqtt_publisher.connect():
+            print("MQTT ready")
+        else:
+            print("MQTT connection failed")
         
+        # Connect to Serial and start reading
+        if self.serial_reader.connect():
+            self.serial_reader.start_reading(data_queue)
+            print("Serial reader started")
+        else:
+          print("Serial connection failed")
+    
+    def check_sensor_data(self, dt):
+        """Check queue for new sensor data (non-blocking)"""
         try:
-            data = read_sensor_data(self.ser)
+            data = data_queue.get_nowait()
+            
             if data:
-                moisture = data['moisture']
+                moisture = data.get('moisture', 0)
+                temperature = data.get('temperature', 0)
+                humidity = data.get('humidity', 0)
+                
                 self.face.animate_to_level(moisture)
-                self.moisture_label.text = str(moisture) + '%'
-                self.temp_value.text = str(int(data.get('temperature', 0))) + 'C'
-                self.humidity_value.text = str(int(data.get('humidity', 0))) + '%'
+                self.moisture_label.text = f"{moisture}%"
+                self.temp_value.text = f"{temperature}°C"
+                self.humidity_value.text = f"{humidity}%"
+                
+                # Publish to MQTT
+                self.mqtt_publisher.publish(temperature, humidity, moisture)
+                self.supabase.save_to_supabase(data)
+                
+                # Save to CSV
                 save_to_csv(data)
-        except:
+                
+                # Log
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                print(f"[{timestamp}] Moisture: {moisture}% | Temp: {temperature}°C | Humidity: {humidity}%")
+            
+        except queue.Empty:
             pass
-    
-    def simulate_data(self, dt):
-        import random
-        m = random.randint(20, 95)
-        self.face.animate_to_level(m)
-        self.moisture_label.text = str(m) + '%'
-        self.temp_value.text = str(random.randint(18, 30)) + 'C'
-        self.humidity_value.text = str(random.randint(40, 80)) + '%'
-    
-    def go_to_analytics(self, *args):
-        self.manager.transition = SlideTransition(direction='left')
-        self.manager.current = 'analytics'
+        except Exception as e:
+            print(f"Error processing sensor data: {e}")
     
     def on_stop(self):
-        if self.ser:
-            self.ser.close()
-
-
-class AnalyticsScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        
-        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        
-        with layout.canvas.before:
-            Color(0.95, 0.97, 1, 1)
-            self.bg = Rectangle(pos=layout.pos, size=layout.size)
-        layout.bind(pos=lambda *a: setattr(self.bg, 'pos', layout.pos),
-                   size=lambda *a: setattr(self.bg, 'size', layout.size))
-        
-        # Header
-        header = BoxLayout(size_hint=(1, None), height=70, spacing=10)
-        back_btn = Button(text='Back', size_hint=(None, 1), width=100,
-                         background_color=(0.3, 0.7, 0.9, 1), bold=True)
-        back_btn.bind(on_press=self.go_back)
-        header.add_widget(back_btn)
-        header.add_widget(Label(text='Data Analytics', font_size='28sp', bold=True,
-                               color=(0.2, 0.2, 0.2, 1)))
-        refresh_btn = Button(text='Refresh', size_hint=(None, 1), width=100,
-                            background_color=(0.3, 0.9, 0.5, 1), bold=True)
-        refresh_btn.bind(on_press=self.load_data)
-        header.add_widget(refresh_btn)
-        layout.add_widget(header)
-        
-        # Scroll
-        scroll = ScrollView()
-        content = BoxLayout(orientation='vertical', spacing=15, size_hint_y=None, padding=10)
-        content.bind(minimum_height=content.setter('height'))
-        
-        # Stats
-        stats = BoxLayout(size_hint=(1, None), height=100, spacing=10)
-        self.moisture_card = self.create_card('Moisture', '--', (0.2, 0.7, 0.9, 1))
-        self.temp_card = self.create_card('Temp', '--', (0.9, 0.4, 0.3, 1))
-        self.humid_card = self.create_card('Humidity', '--', (0.5, 0.8, 0.4, 1))
-        stats.add_widget(self.moisture_card)
-        stats.add_widget(self.temp_card)
-        stats.add_widget(self.humid_card)
-        content.add_widget(stats)
-        
-        # Graphs
-        for title in ['All Parameters', 'Temperature vs Moisture', 'Humidity vs Moisture']:
-            graph_box = BoxLayout(size_hint=(1, None), height=300, padding=10)
-            with graph_box.canvas.before:
-                Color(1, 1, 1, 0.9)
-                rect = Rectangle(pos=graph_box.pos, size=graph_box.size)
-            graph_box.bind(pos=lambda i,v,r=rect: setattr(r, 'pos', i.pos),
-                          size=lambda i,v,r=rect: setattr(r, 'size', i.size))
+        """Cleanup when app closes"""
+        self.serial_reader.stop()
+        self.mqtt_publisher.disconnect()
+        self.supabase.stop()
             
-            graph_layout = BoxLayout(orientation='vertical')
-            graph_layout.add_widget(Label(text=title, size_hint=(1, None), height=30,
-                                        font_size='18sp', bold=True))
-            
-            graph = Graph(xlabel='X', ylabel='Y', x_ticks_major=20, y_ticks_major=20,
-                         x_grid=True, y_grid=True, xmin=0, xmax=100, ymin=0, ymax=100)
-            graph_layout.add_widget(graph)
-            graph_box.add_widget(graph_layout)
-            content.add_widget(graph_box)
-            
-            if title == 'All Parameters':
-                self.graph1 = graph
-            elif title == 'Temperature vs Moisture':
-                self.graph2 = graph
-            else:
-                self.graph3 = graph
-        
-        # Insights
-        insights_box = BoxLayout(orientation='vertical', size_hint=(1, None), padding=15, spacing=10)
-        insights_box.bind(minimum_height=insights_box.setter('height'))
-        with insights_box.canvas.before:
-            Color(0.95, 0.98, 0.95, 1)
-            self.insights_bg = Rectangle(pos=insights_box.pos, size=insights_box.size)
-        insights_box.bind(pos=lambda *a: setattr(self.insights_bg, 'pos', insights_box.pos),
-                         size=lambda *a: setattr(self.insights_bg, 'size', insights_box.size))
-        
-        insights_box.add_widget(Label(text='Smart Insights', font_size='22sp', bold=True,
-                                     color=(0.2, 0.5, 0.2, 1), size_hint=(1, None), height=40))
-        
-        self.insights_label = Label(text='Loading...', font_size='16sp',
-                                   color=(0.3, 0.3, 0.3, 1), size_hint=(1, None),
-                                   markup=True, halign='left', valign='top')
-        self.insights_label.bind(texture_size=lambda *a: setattr(self.insights_label, 'height',
-                                                                 self.insights_label.texture_size[1] + 20))
-        self.insights_label.bind(size=self.insights_label.setter('text_size'))
-        insights_box.add_widget(self.insights_label)
-        content.add_widget(insights_box)
-        
-        scroll.add_widget(content)
-        layout.add_widget(scroll)
-        self.add_widget(layout)
-        
-        self.bind(on_enter=lambda *a: self.load_data())
-    
-    def create_card(self, label, value, color):
-        card = BoxLayout(orientation='vertical', padding=10)
-        with card.canvas.before:
-            Color(*color)
-            card.bg = Rectangle(pos=card.pos, size=card.size)
-        card.bind(pos=lambda *a: setattr(card.bg, 'pos', card.pos),
-                 size=lambda *a: setattr(card.bg, 'size', card.size))
-        
-        card.add_widget(Label(text=label, font_size='16sp', color=(1,1,1,0.9)))
-        value_label = Label(text=value, font_size='28sp', bold=True, color=(1,1,1,1))
-        card.add_widget(value_label)
-        card.value_label = value_label
-        return card
-    
-    def load_data(self, *args):
-        data = load_sensor_data()
-        analysis = analyze_data(data)
-        
-        self.moisture_card.value_label.text = f"{analysis['avg_moisture']:.1f}%"
-        self.temp_card.value_label.text = f"{analysis['avg_temp']:.1f}C"
-        self.humid_card.value_label.text = f"{analysis['avg_humidity']:.1f}%"
-        
-        display_data = data[-100:]
-        
-        # Graph 1: All parameters
-        moisture_plot = MeshLinePlot(color=[0.2, 0.6, 0.9, 1])
-        moisture_plot.points = [(i, d['moisture']) for i, d in enumerate(display_data)]
-        
-        temp_plot = MeshLinePlot(color=[0.9, 0.4, 0.2, 1])
-        temp_plot.points = [(i, d['temperature'] * 2) for i, d in enumerate(display_data)]
-        
-        humid_plot = MeshLinePlot(color=[0.4, 0.8, 0.4, 1])
-        humid_plot.points = [(i, d['humidity']) for i, d in enumerate(display_data)]
-        
-        for p in list(self.graph1.plots):
-            self.graph1.remove_plot(p)
-        self.graph1.add_plot(moisture_plot)
-        self.graph1.add_plot(temp_plot)
-        self.graph1.add_plot(humid_plot)
-        
-        # Graph 2: Temp vs Moisture
-        temp_moisture_plot = MeshLinePlot(color=[0.9, 0.4, 0.2, 1])
-        temp_moisture_plot.points = [(d['temperature'], d['moisture']) for d in display_data]
-        
-        for p in list(self.graph2.plots):
-            self.graph2.remove_plot(p)
-        self.graph2.xmin = min(d['temperature'] for d in display_data) - 2
-        self.graph2.xmax = max(d['temperature'] for d in display_data) + 2
-        self.graph2.add_plot(temp_moisture_plot)
-        
-        # Graph 3: Humidity vs Moisture
-        humid_moisture_plot = MeshLinePlot(color=[0.4, 0.8, 0.4, 1])
-        humid_moisture_plot.points = [(d['humidity'], d['moisture']) for d in display_data]
-        
-        for p in list(self.graph3.plots):
-            self.graph3.remove_plot(p)
-        self.graph3.add_plot(humid_moisture_plot)
-        
-        # Insights
-        self.insights_label.text = '\n\n'.join(analysis['insights'])
-    
-    def go_back(self, *args):
-        self.manager.transition = SlideTransition(direction='right')
-        self.manager.current = 'main'
+                    
 
 
 class SmartAgricApp(App):
     def build(self):
-        sm = ScreenManager()
-        sm.add_widget(MainMonitorScreen(name='main'))
-        sm.add_widget(AnalyticsScreen(name='analytics'))
-        return sm
-    
+        return SmartAgricDashboard()
+
     def on_stop(self):
-        if hasattr(self.root.get_screen('main'), 'on_stop'):
-            self.root.get_screen('main').on_stop()
+        """Called when app is closing"""
+        self.dashboard.on_stop()
         return True
 
-
 if __name__ == '__main__':
-    SmartAgricApp().run()
+    try:
+        SmartAgricApp().run()
+    except KeyboardInterrupt:
+        print("\n Shutting down....")
+    
+    

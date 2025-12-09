@@ -9,6 +9,13 @@ from kivy.properties import NumericProperty, StringProperty
 from kivy.clock import Clock
 from supabase import create_client, Client
 
+import os
+import atexit
+
+# Force gpiozero to use the robust pigpio factory
+os.environ['GPIOZERO_PIN_FACTORY'] = 'pigpio'
+
+
 import serial
 import json 
 import time
@@ -19,6 +26,8 @@ import time
 import random
 from threading import Thread
 import queue
+from gpiozero import OutputDevice
+from time import sleep
 
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
@@ -224,6 +233,8 @@ class SerialReader:
     def connect(self):
         """Connect to serial port"""
         try:
+            if self.serial and self.serial.is_open:
+                self.serial.close()
             self.serial = serial.Serial(self.port, self.baudrate, timeout=2)
             time.sleep(2)  # Wait for Arduino to initialize
             self.serial.flushInput()
@@ -235,15 +246,21 @@ class SerialReader:
     
     def read_data(self):
         """Read and parse JSON data from Arduino"""
+        if not self.serial or not self.serial.is_open:
+            return None
         try:
-            line = self.serial.readline().decode("utf-8").strip()
+            if self.serial.in_waiting > 0:
+                line = self.serial.readline().decode("utf-8").strip()
             
-            if not line.startswith('{'):
-                return None
-            
-            data = json.loads(line)
-            return data
+                if not line.startswith('{'):
+                    return None
+                data = json.loads(line)
+                return data
         
+        except (serial.SerialException, OSError):
+            print("Serial Connection Lost! Reconnection...")
+            self.serial.close()
+            return "RECONNECT_NEEDED"
         except json.JSONDecodeError as e:
             print(f"❌ JSON decode error: {e}")
             return None
@@ -260,7 +277,10 @@ class SerialReader:
         def read_loop():
             while self.running:
                 data = self.read_data()
-                if data:
+                if data == "RECONNECT_NEEDED":
+                    time.sleep(2)
+                    self.connect()
+                elif data:
                     data_queue.put(data)
                 time.sleep(0.1)
         
@@ -332,8 +352,10 @@ def save_to_csv(data):
 class AnimatedFace(Widget):
     moisture_level = NumericProperty(50)
     
-    def __init__(self, **kwargs):
+    def __init__(self, pump_relay_ref, **kwargs):
         super().__init__(**kwargs)
+        
+        self.pump_relay = pump_relay_ref
         
         # Background color (changes based on emotion)
         self.bg_color = None
@@ -591,6 +613,9 @@ class AnimatedFace(Widget):
             self.animate_background_color((0.3, 0.95, 0.4, 1))  # Bright green
             self.show_cheeks()
             self.hide_tear()
+            if self.pump_relay:
+                self.pump_relay.off()
+                print("Pump OFF - Moisture good")
             
         elif self.moisture_level > 30:
             # Worried - YELLOW BACKGROUND
@@ -599,6 +624,9 @@ class AnimatedFace(Widget):
             self.animate_background_color((1, 0.95, 0.3, 1))  # Bright yellow
             self.hide_cheeks()
             self.hide_tear()
+            if self.pump_relay:
+                self.pump_relay.off()
+                print("Pump OFF - Moisture good")
             
         else:
             # Sad - RED BACKGROUND
@@ -607,6 +635,9 @@ class AnimatedFace(Widget):
             self.animate_background_color((1, 0.4, 0.4, 1))  # Bright red
             self.hide_cheeks()
             self.show_tear(center_x, center_y)
+            if self.pump_relay:
+                self.pump_relay.on()
+                print("Pump OFF - Moisture good")
     
     def animate_background_color(self, target_color):
         """Animate the background color change"""
@@ -754,9 +785,12 @@ class SmartAgricDashboard(FloatLayout):
         self.supabase = SUPABASEPublisher(SUPABASE_URL, SUPABASE_KEY)
         self.supabase.start()
         
+        self.pump_relay = OutputDevice(17, active_high=True, initial_value=False)
+        
         # Full screen face
         self.face = AnimatedFace(
             size_hint=(1, 1),
+            pump_relay_ref=self.pump_relay,
             pos_hint={'x': 0, 'y': 0}
         )
         self.add_widget(self.face)

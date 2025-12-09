@@ -4,6 +4,8 @@ const mqtt = require('mqtt');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const { error } = require('console');
+const { type } = require('os');
 
 // ============================================
 // CONFIGURATION
@@ -241,6 +243,45 @@ app.get('/api/sensors/:farmId/:deviceId/history', (req, res) => {
         data: history.slice(0, limit)
     });
 });
+
+app.post('/api/control/pump', (req, res) => {
+    const { farmId, deviceId, action } = req.body;
+
+    if (!farmId || !deviceId || !['ON', 'OFF'].includes(action)) {
+        return res.status(400).json({
+            success: false,
+            error: 'Invalid request. Action must be ON or OFF.'
+        });
+    }
+
+    const commandTopic = `agripal/${farmId}/${deviceId}/command`;
+
+    const payload = JSON.stringify({
+        type: 'PUMP_CONTROL',
+        action: action,
+        timestamp: Date.now()
+    });
+
+    mqttClient.publish(commandTopic, payload, { qos: 1 }, (err) => {
+        if (err) {
+            console.error("Failed to publish command:", err);
+            return res.status(500).json({ success: false, error: 'MQTT Publish failed' })
+        }
+
+        console.log(`Sent PUMP ${action} command to ${commandTopic}`);
+
+        io.emit('pump-status', {
+            deviceId,
+            status: action === 'ON'
+        });
+
+        res.json({
+            success: true,
+            message: `Pump turned ${action}`,
+            timestamp: new Date().toISOString()
+        })
+    })
+})
 
 // ============================================
 // START SERVER
